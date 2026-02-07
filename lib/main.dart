@@ -1,62 +1,111 @@
 import 'dart:ui';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await DatabaseService.init();
-  runApp(const HelmetApp());
-}
+     WidgetsFlutterBinding.ensureInitialized();
+     await SupabaseService.init();
+     runApp(const HelmetApp());
+   }
 
-/* ================= DATABASE ================= */
+/* ================= SUPABASE SERVICE ================= */
 
-class DatabaseService {
-  static late Database db;
+class SupabaseService {
+  static final supabase = Supabase.instance.client;
 
+  // Initialize Supabase (call this in main.dart before runApp)
   static Future<void> init() async {
-    final path = join(await getDatabasesPath(), 'helmet.db');
-    db = await openDatabase(
-      path,
-      version: 1,
-      onCreate: (db, _) async {
-        await db.execute('''
-          CREATE TABLE users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            password TEXT,
-            helmetCode TEXT
-          )
-        ''');
-      },
+    await Supabase.initialize(
+      url: 'https://hoczdzegcfhcgkajflhw.supabase.co',
+      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhvY3pkemVnY2ZoY2drYWpmbGh3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAzNjgzODYsImV4cCI6MjA4NTk0NDM4Nn0.SMJnHWU17DVM_0IlAuLjjE8fjjymm9DOQWz_ik-tpjY',
     );
   }
 
+  // Sign up new user
   static Future<String?> signup(
       String email, String password, String helmetCode) async {
     try {
-      await db.insert('users', {
-        'email': email,
-        'password': password,
-        'helmetCode': helmetCode,
-      });
-      return null;
+      final response = await supabase.auth.signUp(
+        email: email,
+        password: password,
+      );
+
+      if (response.user != null) {
+        // Store helmet code in profiles table
+        await supabase.from('profiles').insert({
+          'id': response.user!.id,
+          'email': email,
+          'helmet_code': helmetCode,
+          'role': 'OWNER',
+        });
+        return null; // Success
+      }
+      return "Signup failed";
     } catch (e) {
-      return "Email already exists";
+      if (e.toString().contains('already registered')) {
+        return "Email already exists";
+      }
+      return e.toString();
     }
   }
 
+  // Login user
   static Future<Map<String, dynamic>?> login(
       String email, String password) async {
-    final res = await db.query(
-      'users',
-      where: 'email=? AND password=?',
-      whereArgs: [email, password],
-    );
-    return res.isNotEmpty ? res.first : null;
+    try {
+      final response = await supabase.auth.signInWithPassword(
+        email: email,
+        password: password,
+      );
+
+      if (response.user != null) {
+        // Fetch helmet code from profiles table
+        final profile = await supabase
+            .from('profiles')
+            .select()
+            .eq('id', response.user!.id)
+            .single();
+
+        return {
+          'email': response.user!.email,
+          'helmetCode': profile['helmet_code'],
+          'role': profile['role'] ?? 'OWNER',
+        };
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Sign out
+  static Future<void> signOut() async {
+    await supabase.auth.signOut();
+  }
+
+  // Get current user profile
+  static Future<Map<String, dynamic>?> getCurrentUserProfile() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return null;
+
+    try {
+      final profile = await supabase
+          .from('profiles')
+          .select()
+          .eq('id', user.id)
+          .single();
+
+      return {
+        'email': user.email,
+        'helmetCode': profile['helmet_code'],
+        'role': profile['role'] ?? 'OWNER',
+      };
+    } catch (e) {
+      return null;
+    }
   }
 }
 
@@ -66,6 +115,18 @@ class UserSession {
   static String email = '';
   static String helmetCode = '';
   static String role = 'OWNER';
+
+  static void setUser(Map<String, dynamic> user) {
+    email = user['email'] ?? '';
+    helmetCode = user['helmetCode'] ?? '';
+    role = user['role'] ?? 'OWNER';
+  }
+
+  static void clear() {
+    email = '';
+    helmetCode = '';
+    role = 'OWNER';
+  }
 }
 
 /* ================= APP ROOT ================= */
@@ -78,12 +139,49 @@ class HelmetApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
-      home: const LoginPage(),
+      home: const AuthCheck(),
     );
   }
 }
 
-/* ================= LOGIN (UNCHANGED) ================= */
+// Optional: Auto-login if session exists
+class AuthCheck extends StatefulWidget {
+  const AuthCheck({super.key});
+
+  @override
+  State<AuthCheck> createState() => _AuthCheckState();
+}
+
+class _AuthCheckState extends State<AuthCheck> {
+  @override
+  void initState() {
+    super.initState();
+    _checkAuth();
+  }
+
+  Future<void> _checkAuth() async {
+    final user = SupabaseService.supabase.auth.currentUser;
+    if (user != null) {
+      final profile = await SupabaseService.getCurrentUserProfile();
+      if (profile != null && mounted) {
+        UserSession.setUser(profile);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const HomePage()),
+        );
+        return;
+      }
+    }
+    // No session, stay on login
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const LoginPage();
+  }
+}
+
+/* ================= LOGIN ================= */
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -95,6 +193,7 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final email = TextEditingController();
   final password = TextEditingController();
+  bool _isLoading = false;
 
   @override
   Widget build(BuildContext context) {
@@ -105,58 +204,62 @@ class _LoginPageState extends State<LoginPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Icon(Icons.sports_motorsports,
-    size: 60, color: Colors.cyanAccent),
-
+                  size: 60, color: Colors.cyanAccent),
               const SizedBox(height: 16),
               cyberField("Email", controller: email),
               const SizedBox(height: 12),
-              cyberField("Password",
-                  controller: password, obscure: true),
+              cyberField("Password", controller: password, obscure: true),
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   style: neonButton(),
-                  onPressed: () async {
-                    final user = await DatabaseService.login(
-                        email.text, password.text);
-                    if (user != null) {
-                      UserSession.email = user['email'];
-                      UserSession.helmetCode =
-                          user['helmetCode'];
-                      Navigator.pushReplacement(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) =>
-                                const HomePage()),
-                      );
-                    } else {
-                      snack(context, "Invalid login");
-                    }
-                  },
-                  child: const Text("LOGIN"),
+                  onPressed: _isLoading
+                      ? null
+                      : () async {
+                          setState(() => _isLoading = true);
+                          
+                          final user = await SupabaseService.login(
+                              email.text, password.text);
+                          
+                          setState(() => _isLoading = false);
+
+                          if (user != null && mounted) {
+                            UserSession.setUser(user);
+                            Navigator.pushReplacement(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => const HomePage()),
+                            );
+                          } else {
+                            if (mounted) snack(context, "Invalid login");
+                          }
+                        },
+                  child: _isLoading
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text("LOGIN"),
                 ),
               ),
               const SizedBox(height: 12),
               socialButton(
                 icon: Icons.g_mobiledata,
                 text: "Sign in with Google",
-                onTap: () =>
-                    snack(context, "UI only"),
+                onTap: () => snack(context, "UI only"),
               ),
               if (Platform.isIOS)
                 socialButton(
                   icon: Icons.apple,
                   text: "Sign in with Apple",
-                  onTap: () =>
-                      snack(context, "UI only"),
+                  onTap: () => snack(context, "UI only"),
                 ),
               TextButton(
                 onPressed: () => Navigator.push(
                   context,
-                  MaterialPageRoute(
-                      builder: (_) =>
-                          const SignupPage()),
+                  MaterialPageRoute(builder: (_) => const SignupPage()),
                 ),
                 child: const Text("Create account"),
               )
@@ -168,20 +271,20 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-/* ================= SIGNUP (UNCHANGED) ================= */
+/* ================= SIGNUP ================= */
 
 class SignupPage extends StatefulWidget {
   const SignupPage({super.key});
 
   @override
-  State<SignupPage> createState() =>
-      _SignupPageState();
+  State<SignupPage> createState() => _SignupPageState();
 }
 
 class _SignupPageState extends State<SignupPage> {
   final email = TextEditingController();
   final password = TextEditingController();
   final helmet = TextEditingController();
+  bool _isLoading = false;
 
   @override
   Widget build(BuildContext context) {
@@ -189,41 +292,48 @@ class _SignupPageState extends State<SignupPage> {
       body: Center(
         child: glassCard(
           Column(
-  mainAxisSize: MainAxisSize.min,
-  children: [
-    const Icon(
-      Icons.sports_motorsports,
-      size: 60,
-      color: Colors.cyanAccent,
-    ),
-    const SizedBox(height: 16),
-
-    cyberField("Email", controller: email),
-
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.sports_motorsports,
+                size: 60,
+                color: Colors.cyanAccent,
+              ),
+              const SizedBox(height: 16),
+              cyberField("Email", controller: email),
               const SizedBox(height: 12),
-              cyberField("Password",
-                  controller: password, obscure: true),
+              cyberField("Password", controller: password, obscure: true),
               const SizedBox(height: 12),
-              cyberField("Helmet Code",
-                  controller: helmet),
+              cyberField("Helmet Code", controller: helmet),
               const SizedBox(height: 20),
               ElevatedButton(
                 style: neonButton(),
-                onPressed: () async {
-                  final err =
-                      await DatabaseService.signup(
-                          email.text,
-                          password.text,
-                          helmet.text);
-                  if (err == null) {
-                    snack(context,
-                        "Signup successful");
-                    Navigator.pop(context);
-                  } else {
-                    snack(context, err);
-                  }
-                },
-                child: const Text("SIGN UP"),
+                onPressed: _isLoading
+                    ? null
+                    : () async {
+                        setState(() => _isLoading = true);
+
+                        final err = await SupabaseService.signup(
+                            email.text, password.text, helmet.text);
+
+                        setState(() => _isLoading = false);
+
+                        if (mounted) {
+                          if (err == null) {
+                            snack(context, "Signup successful! Check your email to verify.");
+                            Navigator.pop(context);
+                          } else {
+                            snack(context, err);
+                          }
+                        }
+                      },
+                child: _isLoading
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text("SIGN UP"),
               )
             ],
           ),
